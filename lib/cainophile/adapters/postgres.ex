@@ -36,6 +36,8 @@ defmodule Cainophile.Adapters.Postgres do
   def start_link(config) do
     register = Keyword.get(config, :register)
 
+    config = Keyword.update(config, :epgsql, %{}, &hide_password/1)
+
     GenServer.start_link(__MODULE__, config, name: register)
   end
 
@@ -56,17 +58,17 @@ defmodule Cainophile.Adapters.Postgres do
 
   @impl true
   def handle_info({:EXIT, _pid, reason}, state) do
-    Logger.debug("Received EXIT signal with reason: #{inspect(reason)}")
+    Logger.debug("Received EXIT signal")
 
-    conn = if state.connection do
-      adapter_impl(state.config).cleanup(state.connection)
-      nil
-    else
-      state.connection
-    end
+    conn =
+      if state.connection do
+        adapter_impl(state.config).cleanup(state.connection)
+        nil
+      else
+        state.connection
+      end
 
-    # redact state
-    {:stop, reason, %{state | connection: conn, config: %{state.config | password: nil}}}
+    {:stop, reason, redact_state(%{state | connection: conn})}
   end
 
   @impl true
@@ -75,15 +77,31 @@ defmodule Cainophile.Adapters.Postgres do
     {:noreply, state}
   end
 
+  @impl true
+  def format_status(_reason, [_process_dictionary, state]) do
+    [data: [{"State", redact_state(state)}]]
+  end
+
+  defp hide_password(%{password: password} = options) when not is_function(password, 0) do
+    %{options | password: fn -> password end}
+  end
+
+  defp hide_password(options), do: options
+
+  defp redact_state(%State{config: config} = state) do
+    %{state | config: Keyword.update(config, :epgsql, %{}, &Map.delete(&1, :password))}
+  end
+
   # TODO: Extract subscription logic into common module for other adapters
 
   @impl true
   def handle_call({:subscribe, receiver_pid}, _from, state) when is_pid(receiver_pid) do
-    subscribers = if receiver_pid in state.subscribers do
-      state.subscribers
-    else
-      [receiver_pid | state.subscribers]
-    end
+    subscribers =
+      if receiver_pid in state.subscribers do
+        state.subscribers
+      else
+        [receiver_pid | state.subscribers]
+      end
 
     {:reply, {:ok, subscribers}, %{state | subscribers: subscribers}}
   end
@@ -216,6 +234,7 @@ defmodule Cainophile.Adapters.Postgres do
   # Client
 
   def subscribe(pid, receiver_pid, timeout \\ 5_000)
+
   def subscribe(pid, receiver_pid, timeout) when is_pid(receiver_pid) do
     GenServer.call(pid, {:subscribe, receiver_pid}, timeout)
   end
@@ -224,3 +243,4 @@ defmodule Cainophile.Adapters.Postgres do
     GenServer.call(pid, {:subscribe, receiver_fun}, timeout)
   end
 end
+
